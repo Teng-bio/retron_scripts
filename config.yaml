@@ -1,5 +1,6 @@
 # Retron系统挖掘流程 v2.0 配置文件
-# 使用: python main_pipeline.py -c config_v2.yaml
+# 方法: Mestre et al., 2020 NAR - 统计关联分析
+# 使用: python main_pipeline.py -c config.yaml
 
 # ============================================================
 # 路径配置
@@ -14,7 +15,7 @@ paths:
   # 基因组核酸序列目录 (.fasta文件)
   fasta_dir: /home/teng/claude_code/retron/fasta_files
 
-  # antiSMASH结果目录
+  # antiSMASH结果目录 (用于提取邻近基因注释)
   antismash_dir: /home/teng/claude_code/retron/antismash_files
 
   # 输出目录
@@ -64,25 +65,57 @@ rna_filter:
 
   # 是否要求存在分支G
   # 建议: 初筛时设为false，后续精筛时设为true
-  require_branch_g: true
+  require_branch_g: false
 
   # 最小茎长度 (bp) - 用于评分，不作为硬过滤条件
   min_stem: 8
 
 # ============================================================
-# 邻近基因参数 (Step 6)
+# 邻近蛋白提取参数 (Step 6) - Mestre方法
 # ============================================================
 neighbors:
-  # 上下游各提取的基因数量
-  num_neighbors: 5
+  # 上下游提取距离 (kb)
+  # Mestre et al., 2020 使用 ±30kb
+  distance: 30
 
 # ============================================================
-# 防御岛分析参数 (Step 7)
+# MMseqs2聚类参数 (Step 7) - Mestre方法
 # ============================================================
-defense:
-  # 防御系统距离阈值 (bp)
-  # 在此距离内的防御系统被认为是"附近"
-  distance_threshold: 10000
+# 注意: MMseqs2需要在单独的conda环境中运行
+# conda activate mmseqs_env
+clustering:
+  # 最小序列一致性 (0-1)
+  # Mestre et al., 2020 使用 30%
+  min_seq_id: 0.3
+
+  # 最小覆盖度 (0-1)
+  # Mestre et al., 2020 使用 80%
+  coverage: 0.8
+
+  # 覆盖度模式
+  # 0: 双向覆盖, 1: 目标序列覆盖, 2: 查询序列覆盖
+  cov_mode: 0
+
+# ============================================================
+# Phyvalue统计关联参数 (Step 8) - Mestre方法
+# ============================================================
+association:
+  # 置换检验次数
+  # 更多次数 = 更准确但更慢
+  n_permutations: 1000
+
+  # 最小出现次数阈值
+  # 蛋白簇至少出现在这么多RT邻近区域
+  min_occurrence: 5
+
+  # 最小Phyvalue阈值
+  # Phyvalue = 观察值 / 期望值
+  # 论文使用 > 2 作为显著关联阈值
+  min_phyvalue: 2.0
+
+  # 是否要求在多个基因组中出现
+  # true: 排除物种特异性关联
+  require_multi_genome: true
 
 # ============================================================
 # 流程控制
@@ -93,13 +126,11 @@ pipeline:
   start_step: 1
 
   # 结束步骤 (1-9)
+  # 推荐: 先运行到Step 6，然后切换环境运行Step 7，再运行Step 8-9
   end_step: 9
 
   # 已有的搜索结果文件（如果start_step > 1）
   # existing_search_results: /path/to/complete_results.tsv
-
-  # 是否跳过防御岛分析（如果DefenseFinder运行太慢）
-  skip_defense: false
 
 # ============================================================
 # 通用参数
@@ -110,3 +141,14 @@ general:
 
   # 详细输出
   verbose: false
+
+# ============================================================
+# 可选: 后续分析工具路径
+# ============================================================
+# 这些工具不是核心流程必需的，但可用于后续功能注释
+optional_tools:
+  # InterProScan数据库路径 (用于蛋白功能注释)
+  # interproscan_path: /media/teng/HP_P900/ipr_data/interproscan-5.59-91.0
+
+  # HHpred数据库路径 (用于远缘同源性搜索)
+  # hhpred_db: /path/to/hhpred/db
