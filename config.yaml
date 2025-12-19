@@ -1,4 +1,4 @@
-# Retron系统挖掘流程 v2.0 配置文件
+# Retron系统挖掘流程 v2.1 配置文件
 # 方法: Mestre et al., 2020 NAR - 统计关联分析
 # 使用: python main_pipeline.py -c config.yaml
 
@@ -6,8 +6,8 @@
 # 路径配置
 # ============================================================
 paths:
-  # RT查询序列目录（已知的Retron RT参考序列，用于Step 1搜索）
-  query_dir: /home/teng/BGCdetection/target_BGC_mining/retron/reference
+  # RT查询序列目录（已知的Retron RT参考序列，用于Step 1 DIAMOND搜索）
+  query_dir: /home/teng/claude_code/retron/database/query_fasta
 
   # RT参考序列目录（用于Step 3系统发育分析）
   # 包含12条已知Retron RT参考序列: Ec67, Ec86, Ec73, Ec83, Ec48, Ec107, Ec78, MX65, ML162, Sa163, Vc95, Se72
@@ -23,10 +23,29 @@ paths:
   antismash_dir: /home/teng/claude_code/retron/antismash_files
 
   # 输出目录
-  output_dir: /home/teng/claude_code/retron/pipeline_v2/output
+  output_dir: /home/teng/claude_code/retron/pipeline_v2/output_hmmer
 
 # ============================================================
-# 搜索参数 (Step 1)
+# HMM搜索参数 (Step 1, v2.1 新增) - 推荐方法
+# ============================================================
+# 使用自建 Retron RT HMM 模型进行搜索，比 DIAMOND 更精确
+# 首先需要运行 bash build_retron_hmm.sh 构建 HMM 模型
+hmm_search:
+  # 是否使用HMM搜索（默认false，使用DIAMOND）
+  # 命令行: --use-hmm
+  use_hmm: ture
+
+  # HMM模型文件路径
+  hmm_model: /home/teng/claude_code/retron/database/retron_hmm/Retron_RT.hmm
+
+  # E-value阈值
+  evalue: 1e-5
+
+  # 最小domain score阈值
+  min_score: 25.0
+
+# ============================================================
+# DIAMOND搜索参数 (Step 1) - 传统方法
 # ============================================================
 search:
   # 最小序列相似度 (%)
@@ -40,8 +59,33 @@ search:
   batch_size: 100
 
 # ============================================================
-# RT系统发育分析参数 (Step 3) - 基于距离标注
+# Tier分层分类参数 (Step 2, v2.1 新增)
 # ============================================================
+# 基于 NAXXH/VTG/YADD motif 的软分类系统
+tier_classification:
+  # Tier分类说明:
+  # - Tier 1: NAXXH + VTG (高置信度) - 经典 Retron RT 标志
+  # - Tier 2: 只有 NAXXH 或 VTG (潜在新型) - 需人工审查
+  # - Tier 3: 有 YADD 标记或无 motif (排除) - 可能是 Group II Intron 或其他 RT
+
+  # 是否在输出中排除 Tier 3 候选
+  # 命令行: --exclude-tier3
+  exclude_tier3: false
+
+  # Step 3 使用的输入: tier1 / tier1_tier2 / all
+  # - tier1: 只使用高置信度候选 (推荐)
+  # - tier1_tier2: 使用 Tier 1 + Tier 2 候选
+  # - all: 使用所有候选 (包括 Tier 3)
+  # 命令行: --tier-input
+  tier_input: tier1_tier2
+
+# ============================================================
+# RT系统发育分析参数 (Step 3) - v2.1 改进
+# ============================================================
+# 方法改进:
+# - MAFFT: --auto -> --localpair --maxiterate 1000 (L-INS-i算法)
+# - 新增: trimal -automated1 自动修剪低质量比对区域
+# - FastTree: 默认 -> -lg -gamma (LG模型 + gamma分布)
 phylogeny:
   # 系统发育距离阈值
   # 用于划分置信度等级：
@@ -106,7 +150,7 @@ association:
   require_multi_genome: true
 
 # ============================================================
-# ncRNA共变验证参数 (Step 8) - 新增
+# ncRNA共变验证参数 (Step 8)
 # ============================================================
 # 基于多序列比对的共变分析，验证Retron ncRNA结构
 # 适用于高GC生物（如Myxobacteria ~70% GC）
@@ -154,19 +198,33 @@ general:
   verbose: false
 
 # ============================================================
-# 流程步骤说明
+# 流程步骤说明 (v2.1)
 # ============================================================
-# Step 1: RT搜索 (DIAMOND)
-#   - 输入: query_dir (参考RT序列), faa_dir (基因组蛋白)
-#   - 输出: 01_search/reports/complete_results.tsv
+# Step 0 (可选): 构建 Retron RT HMM 模型
+#   - 运行: bash build_retron_hmm.sh
+#   - 输出: /home/teng/claude_code/retron/database/retron_hmm/Retron_RT.hmm
 #
-# Step 2: Motif过滤 (NAXXH + VTG)
-#   - 关键的Retron RT motif: NAXXH (Region X) + VTG (Region Y)
-#   - 输出: 02_motif_filtered/motif_filtered.tsv
+# Step 1: RT搜索
+#   方案A (DIAMOND):
+#     - 输入: query_dir (参考RT序列), faa_dir (基因组蛋白)
+#     - 输出: 01_search/reports/complete_results.tsv
+#   方案B (HMM, v2.1 推荐):
+#     - 输入: hmm_model, faa_dir (基因组蛋白)
+#     - 输出: 01_hmm_search/reports/complete_results.tsv
 #
-# Step 3: RT系统发育分析 (MAFFT + FastTree) **新增**
-#   - 构建RT系统发育树，与参考序列比较
-#   - 排除Group II Intron RT, DGR RT, CRISPR-RT
+# Step 2: Tier分层分类 (v2.1 新增)
+#   - NAXXH: [NQDE]A..[HY] - Retron RT特征
+#   - VTG: V[TS]G (C末端150aa) - Retron RT特征
+#   - YADD: Y[AV]DD - Group II Intron标记 (排除)
+#   - Tier 1: NAXXH + VTG (高置信度)
+#   - Tier 2: 部分motif (潜在新型)
+#   - Tier 3: YADD或无motif (排除)
+#   - 输出: 02_motif_tier/tier1_candidates.tsv, tier2_candidates.tsv, tier3_excluded.tsv
+#
+# Step 3: RT系统发育分析 (v2.1 改进)
+#   - MAFFT L-INS-i: --localpair --maxiterate 1000 (适用于低相似度序列)
+#   - trimal: -automated1 (自动修剪低质量区域)
+#   - FastTree: -lg -gamma (LG模型 + gamma分布)
 #   - 输出: 03_phylogeny/retron_candidates.tsv, rt_tree.nwk
 #
 # Step 4: 邻近蛋白提取 (±30kb, Mestre方法)
@@ -182,10 +240,10 @@ general:
 #   - 输出: 06_association/phyvalue_analysis.tsv
 #
 # Step 7: 综合报告与类型分类
-#   - 整合所有分析结果，进行Retron类型分类
+#   - 整合所有分析结果，进行Retron类型分类 (Type I-XIII)
 #   - 输出: 07_report/final_candidates.tsv
 #
-# Step 8: ncRNA共变验证 (可选) **新增**
+# Step 8: ncRNA共变验证 (可选)
 #   - 基于多序列比对的共变分析
 #   - 适用于高GC生物，比单序列折叠更可靠
 #   - 输出: 08_ncrna/covariance_results.tsv, validated_candidates.tsv

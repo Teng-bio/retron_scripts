@@ -4,23 +4,28 @@ Step 3: RT系统发育分析 (Phylogenetic Classification)
 
 基于Mestre et al., 2020的方法，通过系统发育树对RT进行距离标注：
 1. 收集Step 2 Motif过滤后的RT序列
-2. 添加已知Retron RT参考序列 (Ec67, Ec86, Mx65, Mx162, Stig)
-3. MAFFT多序列比对
-4. FastTree构建系统发育树
-5. 计算到各参考序列的距离，标注置信度
+2. 添加已知Retron RT参考序列
+3. MAFFT L-INS-i 高精度多序列比对 (适用于低相似度序列)
+4. trimal 自动修剪比对 (去除低质量区域)
+5. FastTree -lg -gamma 构建系统发育树
+6. 计算到各参考序列的距离，标注置信度
+
+改进说明 (相对于旧版):
+- MAFFT: --auto -> --localpair --maxiterate 1000 (L-INS-i算法)
+  适用于低相似度(20-35%)序列，显著提高比对准确性
+- 新增 trimal: 自动修剪低质量比对区域
+- FastTree: 默认 -> -lg -gamma (LG模型 + gamma分布)
+  更准确的进化距离估计
 
 注意：由于没有可靠的Group II/DGR/CRISPR RT参考序列，
 本脚本只基于已知Retron RT参考进行距离计算，不进行其他RT类型的分类。
-
-与旧版step03_classify_rt.py的区别：
-- 旧版：基于产品描述文本匹配 (不可靠)
-- 新版：基于系统发育距离 (科学准确)
 
 输入：Step2的motif_filtered.tsv + FAA文件
 输出：
   - retron_candidates.tsv: 所有候选（含距离和置信度标注）
   - rt_classification_summary.tsv: 置信度汇总
-  - rt_alignment.fasta: 多序列比对结果
+  - rt_alignment.fasta: MAFFT比对结果
+  - rt_alignment_trimmed.fasta: trimal修剪后结果
   - rt_tree.nwk: 系统发育树
 """
 
@@ -185,7 +190,14 @@ def add_reference_sequences(sequences, ref_sequences, logger):
 
 
 def run_mafft_alignment(sequences, output_dir, logger, threads=8):
-    """运行MAFFT多序列比对"""
+    """
+    运行MAFFT L-INS-i 高精度多序列比对
+
+    L-INS-i (--localpair --maxiterate 1000) 算法特点:
+    - 适用于低相似度 (20-35%) 序列
+    - 比 --auto 更准确但更慢
+    - 对RT酶等保守核心区域的比对质量更高
+    """
     input_fasta = output_dir / "rt_sequences_for_alignment.fasta"
     output_fasta = output_dir / "rt_alignment.fasta"
 
@@ -203,22 +215,28 @@ def run_mafft_alignment(sequences, output_dir, logger, threads=8):
     SeqIO.write(records, input_fasta, 'fasta')
     logger.info(f"写入 {len(records)} 条序列用于比对")
 
-    # 运行MAFFT
+    # 运行MAFFT L-INS-i
+    # --localpair: 使用Smith-Waterman局部比对算法
+    # --maxiterate 1000: 迭代优化次数
+    # 这是L-INS-i算法，适用于低相似度序列
     cmd = [
         'mafft',
-        '--auto',
+        '--localpair',          # L-INS-i的关键参数
+        '--maxiterate', '1000', # 迭代次数
         '--thread', str(threads),
         '--quiet',
         str(input_fasta)
     ]
 
-    logger.info("运行MAFFT比对...")
+    logger.info("运行 MAFFT L-INS-i 比对 (适用于低相似度序列)...")
+    logger.info(f"  参数: --localpair --maxiterate 1000 --thread {threads}")
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=3600  # 1小时超时
         )
 
         with open(output_fasta, 'w') as f:
@@ -230,22 +248,85 @@ def run_mafft_alignment(sequences, output_dir, logger, threads=8):
     except subprocess.CalledProcessError as e:
         logger.error(f"MAFFT运行失败: {e.stderr}")
         return None
+    except subprocess.TimeoutExpired:
+        logger.error("MAFFT超时 (>1小时)，序列可能太多或太长")
+        return None
     except FileNotFoundError:
         logger.error("MAFFT未安装，请安装: conda install -c bioconda mafft")
         return None
 
 
+def run_trimal(alignment_file, output_dir, logger):
+    """
+    运行 trimal 自动修剪比对
+
+    使用 -automated1 参数自动选择最佳修剪策略
+    去除低质量比对区域，提高建树准确性
+    """
+    trimmed_fasta = output_dir / "rt_alignment_trimmed.fasta"
+    html_report = output_dir / "trimal_report.html"
+
+    cmd = [
+        'trimal',
+        '-in', str(alignment_file),
+        '-out', str(trimmed_fasta),
+        '-automated1',  # 自动选择最佳修剪策略
+        '-htmlout', str(html_report)
+    ]
+
+    logger.info("运行 trimal 自动修剪比对...")
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        # 检查修剪后序列长度
+        trimmed_seqs = list(SeqIO.parse(trimmed_fasta, 'fasta'))
+        if trimmed_seqs:
+            trimmed_len = len(trimmed_seqs[0].seq)
+            original_seqs = list(SeqIO.parse(alignment_file, 'fasta'))
+            original_len = len(original_seqs[0].seq) if original_seqs else 0
+
+            logger.info(f"修剪完成: {trimmed_fasta}")
+            logger.info(f"  原始比对长度: {original_len} 位点")
+            logger.info(f"  修剪后长度: {trimmed_len} 位点 ({trimmed_len/original_len*100:.1f}%)")
+
+        return trimmed_fasta
+
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"trimal运行失败: {e.stderr}")
+        logger.warning("将使用未修剪的比对进行建树")
+        return alignment_file
+    except FileNotFoundError:
+        logger.warning("trimal未安装，将使用未修剪的比对")
+        logger.warning("建议安装: conda install -c bioconda trimal")
+        return alignment_file
+
+
 def run_fasttree(alignment_file, output_dir, logger):
-    """运行FastTree构建系统发育树"""
+    """
+    运行 FastTree 构建系统发育树
+
+    使用 -lg -gamma 参数:
+    - -lg: LG氨基酸替换模型 (比默认的JTT更准确)
+    - -gamma: 考虑位点间的速率变异 (gamma分布)
+    这些参数对于蛋白质系统发育分析更准确
+    """
     tree_file = output_dir / "rt_tree.nwk"
 
     cmd = [
         'fasttree',
+        '-lg',      # LG替换模型
+        '-gamma',   # 位点速率变异
         '-quiet',
         str(alignment_file)
     ]
 
-    logger.info("运行FastTree构建系统发育树...")
+    logger.info("运行 FastTree 构建系统发育树...")
+    logger.info("  参数: -lg (LG模型) -gamma (速率变异)")
     try:
         result = subprocess.run(
             cmd,
@@ -378,7 +459,7 @@ def classify_by_phylogeny(tree_file, sequences, ref_sequences, logger, distance_
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Step 3: RT系统发育分析",
+        description="Step 3: RT系统发育分析 (MAFFT L-INS-i + trimal + FastTree)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
@@ -391,9 +472,21 @@ def main():
   # 调整距离阈值
   python step03_phylogeny.py -i motif_filtered.tsv -f /path/to/faa -o 03_phylogeny --distance-threshold 0.6
 
-方法说明:
-  基于MAFFT+FastTree构建RT系统发育树，计算候选到已知Retron参考的距离。
-  从参考序列目录加载所有.fasta文件作为参考序列。
+方法改进说明:
+  1. MAFFT L-INS-i: 使用 --localpair --maxiterate 1000 算法
+     - 比 --auto 更适合低相似度(20-35%)序列
+     - Smith-Waterman局部比对，准确捕捉保守区域
+
+  2. trimal: 自动修剪低质量比对区域
+     - -automated1 参数自动选择最佳修剪策略
+     - 去除gap过多的位置，提高建树准确性
+
+  3. FastTree: 使用 -lg -gamma 参数
+     - LG氨基酸替换模型(比默认JTT更准确)
+     - gamma分布建模位点速率变异
+
+依赖工具:
+  conda install -c bioconda mafft fasttree trimal
 
 置信度等级 (phylo_confidence):
   - high: 距离 < 0.3 (高置信度Retron)
@@ -468,16 +561,20 @@ def main():
     sequences = add_reference_sequences(sequences, ref_sequences, logger)
 
     # MAFFT比对
-    logger.info("\n运行MAFFT多序列比对...")
+    logger.info("\n运行MAFFT L-INS-i 多序列比对...")
     alignment_file = run_mafft_alignment(sequences, output_dir, logger, args.threads)
 
     if not alignment_file:
         logger.error("MAFFT比对失败")
         sys.exit(1)
 
-    # FastTree建树
+    # trimal修剪
+    logger.info("\n运行trimal自动修剪比对...")
+    trimmed_file = run_trimal(alignment_file, output_dir, logger)
+
+    # FastTree建树 (使用修剪后的比对)
     logger.info("\n运行FastTree构建系统发育树...")
-    tree_file = run_fasttree(alignment_file, output_dir, logger)
+    tree_file = run_fasttree(trimmed_file, output_dir, logger)
 
     if not tree_file:
         logger.error("FastTree建树失败")

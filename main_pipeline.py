@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-Retron系统挖掘流程 v2.0 - 主控脚本
+Retron系统挖掘流程 v2.1 - 主控脚本
 
 基于Mestre et al., 2020 NAR的方法论，采用统计关联分析策略：
-1. RT搜索 (DIAMOND/BLAST)
-2. Motif过滤 (NAXXH + VTG)
-3. RT系统发育分析 (排除Group II/DGR/CRISPR-RT)
+0. HMM模型构建 (可选，首次运行: bash build_retron_hmm.sh)
+1. RT搜索 (DIAMOND 或 HMMSEARCH)
+2. Tier分层分类 (NAXXH/VTG/YADD motif软分类)
+3. RT系统发育分析 (MAFFT L-INS-i + trimal + FastTree -lg -gamma)
 4. 邻近蛋白提取 (±30kb, Mestre方法)
 5. MMseqs2蛋白聚类
 6. Phyvalue统计关联分析
 7. 综合报告与Retron类型分类
 8. ncRNA共变验证 (可选，多序列比对方法)
+
+v2.1 改进:
+- 新增 HMM 搜索选项 (step01_hmmsearch.py)
+- Step 2 改为 Tier 1/2/3 软分类 (不进行硬过滤)
+- Step 3 使用 MAFFT L-INS-i + trimal + FastTree -lg -gamma
 
 方法参考：
 - Mestre et al., 2020 NAR: 统计关联分析，基于Phyvalue筛选显著关联蛋白簇
@@ -75,7 +81,7 @@ def run_step(cmd, step_name, logger, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Retron系统挖掘流程 v2.0 (Mestre方法)",
+        description="Retron系统挖掘流程 v2.1 (Mestre方法)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
@@ -85,6 +91,9 @@ def main():
   # 预览命令
   python main_pipeline.py -c config.yaml --dry-run
 
+  # 使用HMM搜索 (推荐)
+  python main_pipeline.py -c config.yaml --use-hmm
+
   # 命令行参数
   python main_pipeline.py \\
     --search-results /path/to/complete_results.tsv \\
@@ -93,10 +102,10 @@ def main():
     --antismash-dir /path/to/antismash \\
     --output ./retron_v2_results
 
-流程概述:
-  Step 1: RT搜索 (DIAMOND)
-  Step 2: Motif过滤 (NAXXH+VTG)
-  Step 3: RT系统发育分析 (MAFFT+FastTree, 排除非Retron RT)
+流程概述 (v2.1):
+  Step 1: RT搜索 (DIAMOND 或 HMMSEARCH)
+  Step 2: Tier分层分类 (Tier1=高置信度, Tier2=潜在新型, Tier3=排除)
+  Step 3: RT系统发育分析 (MAFFT L-INS-i + trimal + FastTree -lg -gamma)
   Step 4: 邻近蛋白提取 (±30kb)
   Step 5: MMseqs2蛋白聚类
   Step 6: Phyvalue统计关联分析
@@ -109,7 +118,7 @@ def main():
     parser.add_argument('-c', '--config', help='YAML配置文件')
 
     # 输入路径
-    parser.add_argument('--query-dir', help='RT查询序列目录 (Step 1)')
+    parser.add_argument('--query-dir', help='RT查询序列目录 (Step 1 DIAMOND)')
     parser.add_argument('--search-results', help='已有的搜索结果 (跳过Step 1)')
     parser.add_argument('--faa-dir', help='蛋白序列目录 (.faa)')
     parser.add_argument('--fasta-dir', help='基因组序列目录 (.fasta)')
@@ -125,11 +134,29 @@ def main():
     parser.add_argument('--skip-ncrna', action='store_true',
                         help='跳过Step 8 ncRNA共变验证')
 
-    # 搜索参数 (Step 1)
+    # HMM搜索选项 (v2.1 新增)
+    parser.add_argument('--use-hmm', action='store_true',
+                        help='使用HMMSEARCH代替DIAMOND (推荐，更精确)')
+    parser.add_argument('--hmm-model',
+                        default='/home/teng/claude_code/retron/database/retron_hmm/Retron_RT.hmm',
+                        help='HMM模型文件路径')
+    parser.add_argument('--hmm-evalue', type=float, default=1e-5,
+                        help='HMMSEARCH E-value阈值 (默认: 1e-5)')
+    parser.add_argument('--hmm-min-score', type=float, default=25.0,
+                        help='HMMSEARCH最小domain score (默认: 25.0)')
+
+    # 搜索参数 (Step 1 DIAMOND)
     parser.add_argument('--min-identity', type=float, default=25,
-                        help='最小序列相似度%% (默认: 25)')
+                        help='DIAMOND最小序列相似度%% (默认: 25)')
     parser.add_argument('--min-coverage', type=float, default=40,
-                        help='最小覆盖度%% (默认: 40)')
+                        help='DIAMOND最小覆盖度%% (默认: 40)')
+
+    # Tier分类参数 (Step 2, v2.1 新增)
+    parser.add_argument('--exclude-tier3', action='store_true',
+                        help='Step 2输出时排除Tier 3候选')
+    parser.add_argument('--tier-input', choices=['all', 'tier1', 'tier1_tier2'],
+                        default='tier1',
+                        help='Step 3使用的输入: all/tier1/tier1_tier2 (默认: tier1)')
 
     # 系统发育参数 (Step 3)
     parser.add_argument('--distance-threshold', type=float, default=0.5,
@@ -236,8 +263,8 @@ def main():
 
     # 步骤输出目录
     dirs = {
-        1: output_dir / "01_search",
-        2: output_dir / "02_motif_filtered",
+        1: output_dir / ("01_hmm_search" if args.use_hmm else "01_search"),
+        2: output_dir / "02_motif_tier",
         3: output_dir / "03_phylogeny",
         4: output_dir / "04_neighbors",
         5: output_dir / "05_clustering",
@@ -247,7 +274,7 @@ def main():
     }
 
     logger.info("=" * 60)
-    logger.info("Retron系统挖掘流程 v2.0 (Mestre方法)")
+    logger.info("Retron系统挖掘流程 v2.1 (Mestre方法)")
     logger.info("=" * 60)
     logger.info(f"输出目录: {output_dir}")
     logger.info(f"步骤范围: {start_step} - {end_step}")
@@ -261,7 +288,7 @@ def main():
     # 步骤输出文件映射
     step_outputs = {
         1: dirs[1] / "reports" / "complete_results.tsv",
-        2: dirs[2] / "motif_filtered.tsv",
+        2: dirs[2] / "tier1_candidates.tsv",  # 默认使用tier1
         3: dirs[3] / "retron_candidates.tsv",
         4: dirs[4] / "rt_info.tsv",
         5: dirs[5] / "rt_cluster_matrix.tsv",
@@ -282,28 +309,56 @@ def main():
 
     # ==================== Step 1: RT搜索 ====================
     if start_step <= 1 <= end_step and not search_results:
-        if not query_dir or not faa_dir:
-            logger.error("Step 1 需要 --query-dir 和 --faa-dir")
-            sys.exit(1)
+        if args.use_hmm:
+            # HMM搜索 (v2.1 推荐)
+            if not faa_dir:
+                logger.error("Step 1 (HMM) 需要 --faa-dir")
+                sys.exit(1)
 
-        cmd = [
-            sys.executable, str(script_dir / "step01_search.py"),
-            "-q", str(query_dir),
-            "-d", str(faa_dir),
-            "-o", str(dirs[1]),
-            "-t", str(threads),
-            "--min-identity", str(min_identity),
-            "--min-coverage", str(min_coverage)
-        ]
-        if antismash_dir:
-            cmd.extend(["-a", str(antismash_dir)])
+            hmm_model = args.hmm_model
+            if not Path(hmm_model).exists():
+                logger.error(f"HMM模型文件不存在: {hmm_model}")
+                logger.error("请先运行 build_retron_hmm.sh 构建HMM模型")
+                sys.exit(1)
 
-        success = run_step(cmd, "Step 1: RT搜索", logger, args.dry_run) and success
+            cmd = [
+                sys.executable, str(script_dir / "step01_hmmsearch.py"),
+                "-m", str(hmm_model),
+                "-d", str(faa_dir),
+                "-o", str(dirs[1]),
+                "-t", str(threads),
+                "--evalue", str(args.hmm_evalue),
+                "--min-score", str(args.hmm_min_score)
+            ]
+            if antismash_dir:
+                cmd.extend(["-a", str(antismash_dir)])
+
+            success = run_step(cmd, "Step 1: HMM搜索 (HMMSEARCH)", logger, args.dry_run) and success
+        else:
+            # DIAMOND搜索 (原方法)
+            if not query_dir or not faa_dir:
+                logger.error("Step 1 (DIAMOND) 需要 --query-dir 和 --faa-dir")
+                sys.exit(1)
+
+            cmd = [
+                sys.executable, str(script_dir / "step01_search.py"),
+                "-q", str(query_dir),
+                "-d", str(faa_dir),
+                "-o", str(dirs[1]),
+                "-t", str(threads),
+                "--min-identity", str(min_identity),
+                "--min-coverage", str(min_coverage)
+            ]
+            if antismash_dir:
+                cmd.extend(["-a", str(antismash_dir)])
+
+            success = run_step(cmd, "Step 1: RT搜索 (DIAMOND)", logger, args.dry_run) and success
+
         current_input = dirs[1] / "reports" / "complete_results.tsv"
     elif start_step <= 1:
         current_input = Path(search_results) if search_results else dirs[1] / "reports" / "complete_results.tsv"
 
-    # ==================== Step 2: Motif过滤 ====================
+    # ==================== Step 2: Tier分层分类 ====================
     if start_step <= 2 <= end_step and success:
         if not faa_dir:
             logger.error("Step 2 需要 --faa-dir")
@@ -315,8 +370,18 @@ def main():
             "-f", str(faa_dir),
             "-o", str(dirs[2])
         ]
-        success = run_step(cmd, "Step 2: Motif过滤 (NAXXH/VTG)", logger, args.dry_run) and success
-        current_input = dirs[2] / "motif_filtered.tsv"
+        if args.exclude_tier3:
+            cmd.append("--exclude-tier3")
+
+        success = run_step(cmd, "Step 2: Tier分层分类 (NAXXH/VTG/YADD)", logger, args.dry_run) and success
+
+        # 根据tier_input参数选择输出文件
+        if args.tier_input == 'tier1':
+            current_input = dirs[2] / "tier1_candidates.tsv"
+        elif args.tier_input == 'tier1_tier2':
+            current_input = dirs[2] / "motif_filtered.tsv"  # Tier1+Tier2
+        else:  # 'all'
+            current_input = dirs[2] / "motif_tier_all.tsv"
 
     # ==================== Step 3: RT系统发育分析 ====================
     if start_step <= 3 <= end_step and success:
@@ -327,6 +392,8 @@ def main():
         # 检查工具
         if not shutil.which('mafft'):
             logger.warning("MAFFT未安装，请先安装: conda install -c bioconda mafft")
+        if not shutil.which('trimal'):
+            logger.warning("trimal未安装，比对修剪将被跳过: conda install -c bioconda trimal")
         if not shutil.which('fasttree'):
             logger.warning("FastTree未安装，请先安装: conda install -c bioconda fasttree")
 
@@ -342,7 +409,7 @@ def main():
         if args.verbose:
             cmd.append("-v")
 
-        success = run_step(cmd, "Step 3: RT系统发育分析", logger, args.dry_run) and success
+        success = run_step(cmd, "Step 3: RT系统发育分析 (MAFFT L-INS-i + trimal + FastTree)", logger, args.dry_run) and success
         current_input = dirs[3] / "retron_candidates.tsv"
 
     # ==================== Step 4: 邻近蛋白提取 ====================
@@ -414,7 +481,7 @@ def main():
         # 添加可选输入文件
         optional_inputs = [
             ("--rt-info", dirs[4] / "rt_info.tsv"),
-            ("--motif", dirs[2] / "motif_filtered.tsv"),
+            ("--motif", dirs[2] / "motif_tier_all.tsv"),
             ("--phylogeny", dirs[3] / "retron_candidates.tsv"),
             ("--cluster-stats", dirs[6] / "phyvalue_analysis.tsv"),
             ("--matrix", dirs[5] / "rt_cluster_matrix.tsv"),
