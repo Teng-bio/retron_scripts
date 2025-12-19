@@ -5,17 +5,17 @@ Retron系统挖掘流程 v2.0 - 主控脚本
 基于Mestre et al., 2020 NAR的方法论，采用统计关联分析策略：
 1. RT搜索 (DIAMOND/BLAST)
 2. Motif过滤 (NAXXH + VTG)
-3. RT分类与排除 (Group II/DGR/CRISPR)
-4. 上游序列提取
-5. RNA结构筛选 (滑动窗口 + 分支G)
-6. 全量邻近蛋白提取 (±30kb)
-7. MMseqs2蛋白聚类与共现矩阵构建
-8. Phyvalue统计关联分析
-9. 基于关联蛋白的Retron类型分类 (Type I-XIII)
+3. RT系统发育分析 (排除Group II/DGR/CRISPR-RT)
+4. 邻近蛋白提取 (±30kb, Mestre方法)
+5. MMseqs2蛋白聚类
+6. Phyvalue统计关联分析
+7. 综合报告与Retron类型分类
+8. ncRNA共变验证 (可选，多序列比对方法)
 
 方法参考：
 - Mestre et al., 2020 NAR: 统计关联分析，基于Phyvalue筛选显著关联蛋白簇
 - 与Millman方法的区别：本流程不依赖DefenseFinder，而是通过无监督聚类发现关联蛋白
+- ncRNA验证采用共变分析，适用于高GC生物
 """
 
 import argparse
@@ -75,12 +75,15 @@ def run_step(cmd, step_name, logger, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Retron系统挖掘流程 v2.0",
+        description="Retron系统挖掘流程 v2.0 (Mestre方法)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
   # 使用配置文件
   python main_pipeline.py -c config.yaml
+
+  # 预览命令
+  python main_pipeline.py -c config.yaml --dry-run
 
   # 命令行参数
   python main_pipeline.py \\
@@ -90,8 +93,15 @@ def main():
     --antismash-dir /path/to/antismash \\
     --output ./retron_v2_results
 
-  # 预览命令
-  python main_pipeline.py -c config.yaml --dry-run
+流程概述:
+  Step 1: RT搜索 (DIAMOND)
+  Step 2: Motif过滤 (NAXXH+VTG)
+  Step 3: RT系统发育分析 (MAFFT+FastTree, 排除非Retron RT)
+  Step 4: 邻近蛋白提取 (±30kb)
+  Step 5: MMseqs2蛋白聚类
+  Step 6: Phyvalue统计关联分析
+  Step 7: 综合报告与类型分类
+  Step 8: ncRNA共变验证 (可选, MAFFT+RNAalifold+R-scape)
         """
     )
 
@@ -110,16 +120,32 @@ def main():
                         help='输出目录 (默认从配置文件读取)')
 
     # 流程控制
-    parser.add_argument('--start-step', type=int, default=1, help='起始步骤 (1-9)')
-    parser.add_argument('--end-step', type=int, default=9, help='结束步骤 (1-9)')
+    parser.add_argument('--start-step', type=int, default=1, help='起始步骤 (1-8)')
+    parser.add_argument('--end-step', type=int, default=8, help='结束步骤 (1-8)')
+    parser.add_argument('--skip-ncrna', action='store_true',
+                        help='跳过Step 8 ncRNA共变验证')
 
-    # MMseqs2 聚类参数 (Step 7)
+    # 搜索参数 (Step 1)
+    parser.add_argument('--min-identity', type=float, default=25,
+                        help='最小序列相似度%% (默认: 25)')
+    parser.add_argument('--min-coverage', type=float, default=40,
+                        help='最小覆盖度%% (默认: 40)')
+
+    # 系统发育参数 (Step 3)
+    parser.add_argument('--distance-threshold', type=float, default=0.5,
+                        help='系统发育距离阈值 (默认: 0.5)')
+
+    # 邻近蛋白提取参数 (Step 4)
+    parser.add_argument('--neighbor-distance', type=int, default=30,
+                        help='邻近蛋白提取距离，单位kb (默认: 30)')
+
+    # MMseqs2 聚类参数 (Step 5)
     parser.add_argument('--min-seq-id', type=float, default=0.3,
                         help='MMseqs2最小序列一致性 (默认: 0.3 = 30%%)')
     parser.add_argument('--coverage', type=float, default=0.8,
                         help='MMseqs2最小覆盖度 (默认: 0.8 = 80%%)')
 
-    # Phyvalue 统计参数 (Step 8)
+    # Phyvalue 统计参数 (Step 6)
     parser.add_argument('--n-permutations', type=int, default=1000,
                         help='置换检验次数 (默认: 1000)')
     parser.add_argument('--min-occurrence', type=int, default=5,
@@ -127,19 +153,14 @@ def main():
     parser.add_argument('--min-phyvalue', type=float, default=2.0,
                         help='最小Phyvalue阈值 (默认: 2.0)')
 
-    # 邻近蛋白提取参数 (Step 6)
-    parser.add_argument('--neighbor-distance', type=int, default=30,
-                        help='邻近蛋白提取距离，单位kb (默认: 30)')
+    # ncRNA验证参数 (Step 8)
+    parser.add_argument('--upstream', type=int, default=600,
+                        help='ncRNA上游提取长度 (默认: 600bp)')
+    parser.add_argument('--min-group-size', type=int, default=3,
+                        help='ncRNA分析最小分组大小 (默认: 3)')
 
-    # 参数
-    parser.add_argument('--min-identity', type=float, default=25)
-    parser.add_argument('--min-coverage', type=float, default=40)
-    parser.add_argument('--upstream', type=int, default=600)
-    parser.add_argument('--window', type=int, default=150)
-    parser.add_argument('--min-mfe', type=float, default=-15.0)
-    parser.add_argument('--require-branch-g', action='store_true')
+    # 通用参数
     parser.add_argument('--threads', type=int, default=8)
-
     parser.add_argument('--dry-run', action='store_true', help='只显示命令')
     parser.add_argument('-v', '--verbose', action='store_true')
 
@@ -175,25 +196,35 @@ def main():
     faa_dir = args.faa_dir or get_config('paths.faa_dir')
     fasta_dir = args.fasta_dir or get_config('paths.fasta_dir')
     antismash_dir = args.antismash_dir or get_config('paths.antismash_dir')
-    # 输出目录：命令行参数 > 配置文件 > 默认值
+    reference_dir = get_config('paths.reference_dir', '/home/teng/claude_code/retron/database/rt_reference')
     output_dir = Path(args.output) if args.output else Path(get_config('paths.output_dir', './retron_v2_results'))
 
-    # 显示关键配置
-    if config:
-        print(f"   配置的输出目录: {get_config('paths.output_dir', '未指定')}")
-        print(f"   实际输出目录: {output_dir.absolute()}")
+    # 参数配置 (命令行优先级高于配置文件)
+    min_identity = args.min_identity if args.min_identity != 25 else get_config('search.min_identity', 25)
+    min_coverage = args.min_coverage if args.min_coverage != 40 else get_config('search.min_coverage', 40)
+    threads = args.threads if args.threads != 8 else get_config('general.threads', 8)
 
-    # 参数配置
-    min_identity = args.min_identity or get_config('search.min_identity', 25)
-    min_coverage = args.min_coverage or get_config('search.min_coverage', 40)
-    upstream = args.upstream or get_config('flanking.upstream', 600)
-    window = args.window or get_config('rna_filter.window_size', 150)
-    min_mfe = args.min_mfe or get_config('rna_filter.min_mfe', -15.0)
-    require_branch_g = args.require_branch_g or get_config('rna_filter.require_branch_g', False)
-    threads = args.threads or get_config('general.threads', 8)
+    # 系统发育参数
+    distance_threshold = args.distance_threshold if args.distance_threshold != 0.5 else get_config('phylogeny.distance_threshold', 0.5)
+
+    # 邻近蛋白参数
+    neighbor_distance = args.neighbor_distance if args.neighbor_distance != 30 else get_config('neighbors.distance', 30)
+
+    # 聚类参数
+    min_seq_id = args.min_seq_id if args.min_seq_id != 0.3 else get_config('clustering.min_seq_id', 0.3)
+    coverage = args.coverage if args.coverage != 0.8 else get_config('clustering.coverage', 0.8)
+
+    # 关联分析参数
+    n_permutations = args.n_permutations if args.n_permutations != 1000 else get_config('association.n_permutations', 1000)
+    min_occurrence = args.min_occurrence if args.min_occurrence != 5 else get_config('association.min_occurrence', 5)
+    min_phyvalue = args.min_phyvalue if args.min_phyvalue != 2.0 else get_config('association.min_phyvalue', 2.0)
+
+    # ncRNA参数
+    upstream = args.upstream if args.upstream != 600 else get_config('ncrna.upstream', 600)
+    min_group_size = args.min_group_size if args.min_group_size != 3 else get_config('ncrna.min_group_size', 3)
 
     start_step = args.start_step or get_config('pipeline.start_step', 1)
-    end_step = args.end_step or get_config('pipeline.end_step', 9)
+    end_step = args.end_step or get_config('pipeline.end_step', 8)
 
     # 创建输出目录
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -207,36 +238,38 @@ def main():
     dirs = {
         1: output_dir / "01_search",
         2: output_dir / "02_motif_filtered",
-        3: output_dir / "03_classified",
-        4: output_dir / "04_flanking",
-        5: output_dir / "05_rna_filtered",
-        6: output_dir / "06_neighbors",
-        7: output_dir / "07_clustering",
-        8: output_dir / "08_association",
-        9: output_dir / "09_report"
+        3: output_dir / "03_phylogeny",
+        4: output_dir / "04_neighbors",
+        5: output_dir / "05_clustering",
+        6: output_dir / "06_association",
+        7: output_dir / "07_report",
+        8: output_dir / "08_ncrna"
     }
 
     logger.info("=" * 60)
-    logger.info("Retron系统挖掘流程 v2.0")
+    logger.info("Retron系统挖掘流程 v2.0 (Mestre方法)")
     logger.info("=" * 60)
     logger.info(f"输出目录: {output_dir}")
     logger.info(f"步骤范围: {start_step} - {end_step}")
 
+    # 显示配置信息
+    if config:
+        logger.info(f"配置文件: {args.config}")
+
     success = True
 
-    # 根据start_step确定正确的初始输入文件
+    # 步骤输出文件映射
     step_outputs = {
         1: dirs[1] / "reports" / "complete_results.tsv",
         2: dirs[2] / "motif_filtered.tsv",
         3: dirs[3] / "retron_candidates.tsv",
-        4: dirs[4] / "flanking_sequences.fasta",
-        5: dirs[5] / "filter_results.tsv",
-        6: dirs[6] / "rt_info.tsv",
-        7: dirs[7] / "rt_cluster_matrix.tsv",
-        8: dirs[8] / "phyvalue_analysis.tsv",
+        4: dirs[4] / "rt_info.tsv",
+        5: dirs[5] / "rt_cluster_matrix.tsv",
+        6: dirs[6] / "phyvalue_analysis.tsv",
+        7: dirs[7] / "final_candidates.tsv",
     }
 
-    # 如果从中间步骤开始，使用前一步骤的输出
+    # 确定初始输入文件
     if start_step > 1:
         prev_step = start_step - 1
         if prev_step in step_outputs and step_outputs[prev_step].exists():
@@ -247,7 +280,7 @@ def main():
     else:
         current_input = search_results
 
-    # Step 1: RT搜索
+    # ==================== Step 1: RT搜索 ====================
     if start_step <= 1 <= end_step and not search_results:
         if not query_dir or not faa_dir:
             logger.error("Step 1 需要 --query-dir 和 --faa-dir")
@@ -268,11 +301,9 @@ def main():
         success = run_step(cmd, "Step 1: RT搜索", logger, args.dry_run) and success
         current_input = dirs[1] / "reports" / "complete_results.tsv"
     elif start_step <= 1:
-        # Step 1在范围内但跳过（提供了search_results）
         current_input = Path(search_results) if search_results else dirs[1] / "reports" / "complete_results.tsv"
-    # 如果start_step > 1，current_input已经在前面设置好了
 
-    # Step 2: Motif过滤
+    # ==================== Step 2: Motif过滤 ====================
     if start_step <= 2 <= end_step and success:
         if not faa_dir:
             logger.error("Step 2 需要 --faa-dir")
@@ -287,123 +318,158 @@ def main():
         success = run_step(cmd, "Step 2: Motif过滤 (NAXXH/VTG)", logger, args.dry_run) and success
         current_input = dirs[2] / "motif_filtered.tsv"
 
-    # Step 3: RT分类
+    # ==================== Step 3: RT系统发育分析 ====================
     if start_step <= 3 <= end_step and success:
+        if not faa_dir:
+            logger.error("Step 3 需要 --faa-dir")
+            sys.exit(1)
+
+        # 检查工具
+        if not shutil.which('mafft'):
+            logger.warning("MAFFT未安装，请先安装: conda install -c bioconda mafft")
+        if not shutil.which('fasttree'):
+            logger.warning("FastTree未安装，请先安装: conda install -c bioconda fasttree")
+
         cmd = [
-            sys.executable, str(script_dir / "step03_classify_rt.py"),
+            sys.executable, str(script_dir / "step03_phylogeny.py"),
             "-i", str(current_input),
+            "-f", str(faa_dir),
+            "-r", str(reference_dir),
             "-o", str(dirs[3]),
-            "--keep-excluded"
+            "--distance-threshold", str(distance_threshold),
+            "--threads", str(threads)
         ]
-        success = run_step(cmd, "Step 3: RT分类与排除", logger, args.dry_run) and success
+        if args.verbose:
+            cmd.append("-v")
+
+        success = run_step(cmd, "Step 3: RT系统发育分析", logger, args.dry_run) and success
         current_input = dirs[3] / "retron_candidates.tsv"
 
-    # Step 4: 上游序列提取
+    # ==================== Step 4: 邻近蛋白提取 ====================
     if start_step <= 4 <= end_step and success:
-        if not fasta_dir:
-            logger.error("Step 4 需要 --fasta-dir")
+        if not antismash_dir:
+            logger.error("Step 4 需要 --antismash-dir")
             sys.exit(1)
 
         cmd = [
-            sys.executable, str(script_dir / "step04_extract_flanking.py"),
+            sys.executable, str(script_dir / "step04_extract_neighbors.py"),
             "-i", str(current_input),
-            "-f", str(fasta_dir),
+            "-a", str(antismash_dir),
             "-o", str(dirs[4]),
-            "--upstream", str(upstream)
+            "--distance", str(neighbor_distance)
         ]
-        success = run_step(cmd, "Step 4: 上游序列提取", logger, args.dry_run) and success
+        if args.verbose:
+            cmd.append("-v")
 
-    # Step 5: RNA结构筛选
+        success = run_step(cmd, f"Step 4: 邻近蛋白提取 (±{neighbor_distance}kb)", logger, args.dry_run) and success
+
+    # ==================== Step 5: MMseqs2蛋白聚类 ====================
     if start_step <= 5 <= end_step and success:
-        cmd = [
-            sys.executable, str(script_dir / "step05_rna_filter.py"),
-            "-i", str(dirs[4] / "flanking_sequences.fasta"),
-            "-o", str(dirs[5]),
-            "--window", str(window),
-            "--min-mfe", str(min_mfe)
-        ]
-        if require_branch_g:
-            cmd.append("--require-branch-g")
-
-        success = run_step(cmd, "Step 5: RNA结构筛选", logger, args.dry_run) and success
-        current_input = dirs[5] / "filter_results.tsv"
-
-    # Step 6: 全量邻近蛋白提取 (±30kb, Mestre方法)
-    if start_step <= 6 <= end_step and success:
-        if not antismash_dir:
-            logger.warning("Step 6 需要 --antismash-dir，跳过")
+        step04_dir = dirs[4]
+        if not (step04_dir / "all_neighbors.faa").exists() and not args.dry_run:
+            logger.warning("Step 4输出不存在，跳过Step 5")
         else:
-            neighbor_distance = args.neighbor_distance if hasattr(args, 'neighbor_distance') else get_config('neighbors.distance', 30)
-            cmd = [
-                sys.executable, str(script_dir / "step06_extract_neighbors.py"),
-                "-i", str(current_input),
-                "-a", str(antismash_dir),
-                "-o", str(dirs[6]),
-                "--distance", str(neighbor_distance)
-            ]
-            success = run_step(cmd, "Step 6: 全量邻近蛋白提取 (±30kb)", logger, args.dry_run) and success
+            if not shutil.which('mmseqs'):
+                logger.warning("MMseqs2未安装，请先安装: conda install -c bioconda mmseqs2")
 
-    # Step 7: MMseqs2蛋白聚类与共现矩阵构建 (Mestre方法)
-    if start_step <= 7 <= end_step and success:
-        step06_dir = dirs[6]
-        if not (step06_dir / "all_neighbors.faa").exists() and not args.dry_run:
-            logger.warning("Step 6输出不存在，跳过Step 7")
-        else:
-            min_seq_id = args.min_seq_id if hasattr(args, 'min_seq_id') else get_config('clustering.min_seq_id', 0.3)
-            coverage = args.coverage if hasattr(args, 'coverage') else get_config('clustering.coverage', 0.8)
             cmd = [
-                sys.executable, str(script_dir / "step07_mmseqs_cluster.py"),
-                "-i", str(step06_dir),
-                "-o", str(dirs[7]),
+                sys.executable, str(script_dir / "step05_mmseqs_cluster.py"),
+                "-i", str(step04_dir),
+                "-o", str(dirs[5]),
                 "--min-seq-id", str(min_seq_id),
                 "--coverage", str(coverage),
                 "--threads", str(threads)
             ]
-            # 检查MMseqs2
-            if not shutil.which('mmseqs'):
-                logger.warning("MMseqs2未安装，请先安装: conda install -c bioconda mmseqs2")
-            success = run_step(cmd, "Step 7: MMseqs2蛋白聚类", logger, args.dry_run) and success
+            if args.verbose:
+                cmd.append("-v")
 
-    # Step 8: Phyvalue统计关联分析 (Mestre方法)
-    if start_step <= 8 <= end_step and success:
-        step07_dir = dirs[7]
-        if not (step07_dir / "rt_cluster_matrix.tsv").exists() and not args.dry_run:
-            logger.warning("Step 7输出不存在，跳过Step 8")
+            success = run_step(cmd, "Step 5: MMseqs2蛋白聚类", logger, args.dry_run) and success
+
+    # ==================== Step 6: Phyvalue统计关联分析 ====================
+    if start_step <= 6 <= end_step and success:
+        step05_dir = dirs[5]
+        if not (step05_dir / "rt_cluster_matrix.tsv").exists() and not args.dry_run:
+            logger.warning("Step 5输出不存在，跳过Step 6")
         else:
-            n_permutations = args.n_permutations if hasattr(args, 'n_permutations') else get_config('association.n_permutations', 1000)
-            min_occurrence = args.min_occurrence if hasattr(args, 'min_occurrence') else get_config('association.min_occurrence', 5)
-            min_phyvalue = args.min_phyvalue if hasattr(args, 'min_phyvalue') else get_config('association.min_phyvalue', 2.0)
             cmd = [
-                sys.executable, str(script_dir / "step08_phyvalue_analysis.py"),
-                "-i", str(step07_dir),
-                "-o", str(dirs[8]),
+                sys.executable, str(script_dir / "step06_phyvalue_analysis.py"),
+                "-i", str(step05_dir),
+                "-o", str(dirs[6]),
                 "--n-permutations", str(n_permutations),
                 "--min-occurrence", str(min_occurrence),
                 "--min-phyvalue", str(min_phyvalue)
             ]
-            success = run_step(cmd, "Step 8: Phyvalue统计关联分析", logger, args.dry_run) and success
+            if args.verbose:
+                cmd.append("-v")
 
-    # Step 9: 综合报告与Retron类型分类 (Mestre方法)
-    if start_step <= 9 <= end_step and success:
+            success = run_step(cmd, "Step 6: Phyvalue统计关联分析", logger, args.dry_run) and success
+
+    # ==================== Step 7: 综合报告与类型分类 ====================
+    if start_step <= 7 <= end_step and success:
         cmd = [
-            sys.executable, str(script_dir / "step09_final_report.py"),
-            "-o", str(dirs[9]),
-            "--rt-info", str(dirs[6] / "rt_info.tsv"),
+            sys.executable, str(script_dir / "step07_final_report.py"),
+            "-o", str(dirs[7]),
         ]
+
         # 添加可选输入文件
         optional_inputs = [
+            ("--rt-info", dirs[4] / "rt_info.tsv"),
             ("--motif", dirs[2] / "motif_filtered.tsv"),
-            ("--classified", dirs[3] / "retron_candidates.tsv"),
-            ("--rna", dirs[5] / "filter_results.tsv"),
-            ("--cluster-stats", dirs[8] / "phyvalue_analysis.tsv"),
-            ("--matrix", dirs[7] / "rt_cluster_matrix.tsv"),
-            ("--neighbor-matrix", dirs[6] / "neighbor_matrix.tsv"),
+            ("--phylogeny", dirs[3] / "retron_candidates.tsv"),
+            ("--cluster-stats", dirs[6] / "phyvalue_analysis.tsv"),
+            ("--matrix", dirs[5] / "rt_cluster_matrix.tsv"),
+            ("--neighbor-matrix", dirs[4] / "neighbor_matrix.tsv"),
         ]
         for flag, path in optional_inputs:
             if path.exists() or args.dry_run:
                 cmd.extend([flag, str(path)])
 
-        success = run_step(cmd, "Step 9: 综合报告与类型分类", logger, args.dry_run) and success
+        if args.verbose:
+            cmd.append("-v")
+
+        success = run_step(cmd, "Step 7: 综合报告与类型分类", logger, args.dry_run) and success
+
+    # ==================== Step 8: ncRNA共变验证 (可选) ====================
+    if start_step <= 8 <= end_step and success and not args.skip_ncrna:
+        if not fasta_dir:
+            logger.warning("Step 8 需要 --fasta-dir，跳过ncRNA验证")
+        else:
+            # 检查工具
+            tools_ok = True
+            if not shutil.which('mafft'):
+                logger.warning("MAFFT未安装")
+                tools_ok = False
+            if not shutil.which('RNAalifold'):
+                logger.warning("RNAalifold (ViennaRNA)未安装")
+                tools_ok = False
+
+            if tools_ok or args.dry_run:
+                # 确定输入文件
+                ncrna_input = dirs[7] / "final_candidates.tsv"
+                if not ncrna_input.exists() and not args.dry_run:
+                    ncrna_input = dirs[3] / "retron_candidates.tsv"
+
+                cmd = [
+                    sys.executable, str(script_dir / "step08_ncrna_validation.py"),
+                    "-i", str(ncrna_input),
+                    "-f", str(fasta_dir),
+                    "-o", str(dirs[8]),
+                    "--upstream", str(upstream),
+                    "--min-group-size", str(min_group_size),
+                    "--threads", str(threads)
+                ]
+
+                # 添加系统发育文件用于分组
+                phylo_file = dirs[3] / "retron_candidates.tsv"
+                if phylo_file.exists() or args.dry_run:
+                    cmd.extend(["--phylogeny", str(phylo_file)])
+
+                if args.verbose:
+                    cmd.append("-v")
+
+                success = run_step(cmd, "Step 8: ncRNA共变验证", logger, args.dry_run) and success
+            else:
+                logger.warning("缺少必要工具，跳过Step 8 ncRNA共变验证")
 
     # 总结
     logger.info("\n" + "=" * 60)
@@ -412,6 +478,13 @@ def main():
     else:
         logger.error("✗ 部分步骤失败")
     logger.info(f"输出目录: {output_dir}")
+
+    # 输出结构说明
+    logger.info("\n输出目录结构:")
+    for step_num, step_dir in dirs.items():
+        if step_dir.exists():
+            logger.info(f"  {step_dir.name}/")
+
     logger.info("=" * 60)
 
     return 0 if success else 1

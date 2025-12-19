@@ -6,8 +6,12 @@
 # 路径配置
 # ============================================================
 paths:
-  # RT查询序列目录（已知的Retron RT参考序列）
+  # RT查询序列目录（已知的Retron RT参考序列，用于Step 1搜索）
   query_dir: /home/teng/BGCdetection/target_BGC_mining/retron/reference
+
+  # RT参考序列目录（用于Step 3系统发育分析）
+  # 包含12条已知Retron RT参考序列: Ec67, Ec86, Ec73, Ec83, Ec48, Ec107, Ec78, MX65, ML162, Sa163, Vc95, Se72
+  reference_dir: /home/teng/claude_code/retron/database/rt_reference
 
   # 基因组蛋白序列目录 (.faa文件)
   faa_dir: /home/teng/claude_code/retron/faa_failes
@@ -36,50 +40,34 @@ search:
   batch_size: 100
 
 # ============================================================
-# 上游序列提取参数 (Step 4)
+# RT系统发育分析参数 (Step 3) - 基于距离标注
 # ============================================================
-flanking:
-  # 上游提取长度 (bp)
-  # ncRNA通常在RT起始密码子上游200-500bp范围内
-  upstream: 600
+phylogeny:
+  # 系统发育距离阈值
+  # 用于划分置信度等级：
+  # - high: 距离 < 0.3
+  # - medium: 0.3 <= 距离 < threshold
+  # - low: threshold <= 距离 < threshold*1.5
+  # - very_low: 距离 >= threshold*1.5
+  distance_threshold: 0.5
 
-  # RT头部重叠区长度 (bp)
-  head_overlap: 50
-
-# ============================================================
-# RNA结构筛选参数 (Step 5)
-# ============================================================
-rna_filter:
-  # 滑动窗口大小 (bp)
-  window_size: 150
-
-  # 滑动步长 (bp)
-  step_size: 10
-
-  # 最小自由能阈值 (kcal/mol)
-  # 对于高GC生物，可以适当放宽
-  min_mfe: -15.0
-
-  # 颈部闭合最小配对数
-  min_neck_pairs: 3
-
-  # 是否要求存在分支G
-  # 建议: 初筛时设为false，后续精筛时设为true
-  require_branch_g: false
-
-  # 最小茎长度 (bp) - 用于评分，不作为硬过滤条件
-  min_stem: 8
+  # 参考序列说明：
+  # 从 paths.reference_dir 加载所有.fasta文件作为参考序列
+  # 当前包含12条已知Retron RT参考序列:
+  # - Ec67, Ec86, Ec73, Ec83, Ec48, Ec107, Ec78 (E. coli)
+  # - MX65 (M. xanthus), ML162 (Melittangium)
+  # - Sa163 (Stigmatella), Vc95 (Vibrio), Se72 (Salmonella)
 
 # ============================================================
-# 邻近蛋白提取参数 (Step 6) - Mestre方法
+# 邻近蛋白提取参数 (Step 4) - Mestre方法
 # ============================================================
 neighbors:
   # 上下游提取距离 (kb)
   # Mestre et al., 2020 使用 ±30kb
-  distance: 30
+  distance: 20
 
 # ============================================================
-# MMseqs2聚类参数 (Step 7) - Mestre方法
+# MMseqs2聚类参数 (Step 5) - Mestre方法
 # ============================================================
 # 注意: MMseqs2需要在单独的conda环境中运行
 # conda activate mmseqs_env
@@ -97,7 +85,7 @@ clustering:
   cov_mode: 0
 
 # ============================================================
-# Phyvalue统计关联参数 (Step 8) - Mestre方法
+# Phyvalue统计关联参数 (Step 6) - Mestre方法
 # ============================================================
 association:
   # 置换检验次数
@@ -118,16 +106,39 @@ association:
   require_multi_genome: true
 
 # ============================================================
+# ncRNA共变验证参数 (Step 8) - 新增
+# ============================================================
+# 基于多序列比对的共变分析，验证Retron ncRNA结构
+# 适用于高GC生物（如Myxobacteria ~70% GC）
+ncrna:
+  # RT上游序列提取长度 (bp)
+  # ncRNA通常在RT起始密码子上游200-500bp范围内
+  upstream: 600
+
+  # 最小分组大小
+  # 每组至少需要这么多序列才能进行共变分析
+  min_group_size: 3
+
+  # 工具依赖:
+  # - MAFFT: 多序列比对 (conda install -c bioconda mafft)
+  # - RNAalifold: 共识结构预测 (conda install -c bioconda viennarna)
+  # - R-scape: 共变分析 (conda install -c bioconda r-scape, 可选)
+
+# ============================================================
 # 流程控制
 # ============================================================
 pipeline:
-  # 起始步骤 (1-9)
+  # 起始步骤 (1-8)
   # 1=从头开始, 2=跳过搜索
   start_step: 1
 
-  # 结束步骤 (1-9)
-  # 推荐: 先运行到Step 6，然后切换环境运行Step 7，再运行Step 8-9
-  end_step: 9
+  # 结束步骤 (1-8)
+  # 推荐: 先运行到Step 5，然后切换环境运行Step 5 (MMseqs2)，再运行Step 6-8
+  end_step: 8
+
+  # 是否跳过ncRNA共变验证 (Step 8)
+  # 如果只关心关联蛋白分析，可以跳过
+  skip_ncrna: false
 
   # 已有的搜索结果文件（如果start_step > 1）
   # existing_search_results: /path/to/complete_results.tsv
@@ -143,12 +154,38 @@ general:
   verbose: false
 
 # ============================================================
-# 可选: 后续分析工具路径
+# 流程步骤说明
 # ============================================================
-# 这些工具不是核心流程必需的，但可用于后续功能注释
-optional_tools:
-  # InterProScan数据库路径 (用于蛋白功能注释)
-  # interproscan_path: /media/teng/HP_P900/ipr_data/interproscan-5.59-91.0
-
-  # HHpred数据库路径 (用于远缘同源性搜索)
-  # hhpred_db: /path/to/hhpred/db
+# Step 1: RT搜索 (DIAMOND)
+#   - 输入: query_dir (参考RT序列), faa_dir (基因组蛋白)
+#   - 输出: 01_search/reports/complete_results.tsv
+#
+# Step 2: Motif过滤 (NAXXH + VTG)
+#   - 关键的Retron RT motif: NAXXH (Region X) + VTG (Region Y)
+#   - 输出: 02_motif_filtered/motif_filtered.tsv
+#
+# Step 3: RT系统发育分析 (MAFFT + FastTree) **新增**
+#   - 构建RT系统发育树，与参考序列比较
+#   - 排除Group II Intron RT, DGR RT, CRISPR-RT
+#   - 输出: 03_phylogeny/retron_candidates.tsv, rt_tree.nwk
+#
+# Step 4: 邻近蛋白提取 (±30kb, Mestre方法)
+#   - 提取RT上下游固定距离内的所有ORF
+#   - 输出: 04_neighbors/all_neighbors.faa, neighbor_matrix.tsv
+#
+# Step 5: MMseqs2蛋白聚类
+#   - 对邻近蛋白进行序列聚类
+#   - 输出: 05_clustering/rt_cluster_matrix.tsv
+#
+# Step 6: Phyvalue统计关联分析
+#   - 计算蛋白簇与RT的共现显著性
+#   - 输出: 06_association/phyvalue_analysis.tsv
+#
+# Step 7: 综合报告与类型分类
+#   - 整合所有分析结果，进行Retron类型分类
+#   - 输出: 07_report/final_candidates.tsv
+#
+# Step 8: ncRNA共变验证 (可选) **新增**
+#   - 基于多序列比对的共变分析
+#   - 适用于高GC生物，比单序列折叠更可靠
+#   - 输出: 08_ncrna/covariance_results.tsv, validated_candidates.tsv

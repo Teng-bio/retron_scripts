@@ -49,10 +49,38 @@ def parse_seq_id(seq_id):
     """
     解析序列ID，提取基因组和位置信息
 
-    格式: query|genome|contig|start-end|strand|...
+    支持多种格式:
+    - 格式1 (Step5): query|genome|protein_id|contig|start-end|strand
+    - 格式2 (旧版): query|genome|contig|start-end|strand
     """
     parts = seq_id.split('|')
-    if len(parts) >= 5:
+
+    # 格式1: 6部分 (Step5 filter_results.tsv)
+    if len(parts) >= 6:
+        query = parts[0]
+        genome = parts[1]
+        # parts[2] = protein_id
+        contig = parts[3]
+
+        pos_match = re.match(r'(\d+)-(\d+)', parts[4])
+        if pos_match:
+            start = int(pos_match.group(1))
+            end = int(pos_match.group(2))
+        else:
+            start, end = 0, 0
+
+        strand = parts[5] if len(parts) > 5 else '+'
+
+        return {
+            'query': query,
+            'genome': genome,
+            'contig': contig,
+            'start': start,
+            'end': end,
+            'strand': strand
+        }
+    # 格式2: 5部分 (旧版)
+    elif len(parts) >= 5:
         query = parts[0]
         genome = parts[1]
         contig = parts[2]
@@ -335,6 +363,7 @@ def main():
     candidates = []
 
     if args.from_search:
+        # Step1 搜索结果格式
         for _, row in df.iterrows():
             candidates.append({
                 'query': row.get('query', 'unknown'),
@@ -345,11 +374,32 @@ def main():
                 'strand': row.get('gene_strand', row.get('strand', '+'))
             })
     else:
-        for _, row in df.iterrows():
-            seq_id = row['seq_id']
-            parsed = parse_seq_id(seq_id)
-            if parsed:
-                candidates.append(parsed)
+        # Step5 filter_results.tsv 格式 - 优先使用已有的列
+        has_direct_columns = all(col in df.columns for col in ['genome', 'contig', 'global_start', 'global_end'])
+
+        if has_direct_columns:
+            logger.info("使用独立列: genome, contig, global_start, global_end")
+            for _, row in df.iterrows():
+                # 从 seq_id 提取 query
+                seq_id = row.get('seq_id', '')
+                query = seq_id.split('|')[0] if '|' in seq_id else 'unknown'
+
+                candidates.append({
+                    'query': query,
+                    'genome': row['genome'],
+                    'contig': row['contig'],
+                    'start': int(row['global_start']),
+                    'end': int(row['global_end']),
+                    'strand': row.get('strand', '+')
+                })
+        else:
+            # 回退到解析 seq_id
+            logger.info("解析 seq_id 列")
+            for _, row in df.iterrows():
+                seq_id = row['seq_id']
+                parsed = parse_seq_id(seq_id)
+                if parsed:
+                    candidates.append(parsed)
 
     logger.info(f"解析到 {len(candidates)} 个候选")
 
